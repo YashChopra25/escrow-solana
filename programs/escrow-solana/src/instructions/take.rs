@@ -1,81 +1,76 @@
 use anchor_lang::prelude::*;
 use anchor_spl::{
     associated_token::AssociatedToken,
-    token::{close_account, transfer_checked, CloseAccount, TransferChecked},
-    token_interface::{Mint, TokenAccount, TokenInterface},
+    token_interface::{
+        close_account, transfer_checked, CloseAccount, Mint, TokenAccount, TokenInterface,
+        TransferChecked,
+    },
 };
 
 use crate::Escrow;
+
 pub fn handler(ctx: Context<TakeEscrow>) -> Result<()> {
-    ctx.accounts.transfer_to_maker()?;
+    ctx.accounts.send_to_maker()?;
     ctx.accounts.withdraw_and_close_vault()?;
     Ok(())
 }
 
-#[account]
-pub struct TakeEscroAccount {
-    pub taker: Pubkey,   // the person who initiated the take request
-    pub maker: Pubkey,   // the person who made the escrow(make.rs),
-    escrow: Pubkey,      // the escrow account
-    mint_a: Pubkey,      // the mint of the token to be taken
-    mint_b: Pubkey,      // the mint of the token to be given
-    vault: Pubkey, // vault: the token account associated with the escrow and mint_a that will send the tokens to the taker
-    maker_ata_b: Pubkey, // the ata of the token to be given to the maker
-}
-
 #[derive(Accounts)]
-#[instruction(seed:u64)]
 pub struct TakeEscrow<'info> {
     #[account(mut)]
-    pub taker: Signer<'info>, // the person who takes the escrow,
+    pub taker: Signer<'info>,
 
     #[account(mut)]
-    pub maker: SystemAccount<'info>, //ther person who makes the escrow intially
+    pub maker: SystemAccount<'info>,
 
     #[account(
         mut,
-        seeds=[b"escrow",maker.key().as_ref(),seed.to_be_bytes().as_ref()],
-        bump=escrow.bump,
-        has_one=maker @EscrowError::InvalidMaker,
-        has_one=mint_a @EscrowError::InvalidMintA,
-        has_one=mint_b @EscrowError::InvalidMintB,
+        seeds = [b"escrow", maker.key().as_ref(), escrow.seed.to_be_bytes().as_ref()],
+        bump = escrow.bump,
+        has_one = maker @ EscrowError::InvalidMaker,
+        has_one = mint_a @ EscrowError::InvalidMintA,
+        has_one = mint_b @ EscrowError::InvalidMintB,
+        close = maker,
     )]
-    pub escrow: Box<Account<'info, Escrow>>, // the account on the contract for escrow
-    //token Accounts
-    pub mint_a: Box<InterfaceAccount<'info, Mint>>, //the token that the makers deposit
-    pub mint_b: Box<InterfaceAccount<'info, Mint>>, //the token that the taker exchange
+    pub escrow: Box<Account<'info, Escrow>>,
+
+    pub mint_a: Box<InterfaceAccount<'info, Mint>>,
+    pub mint_b: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(
         mut,
-        associated_token::mint=mint_b,
-        associated_token::authority=taker,
-        associated_token::token_program=token_program
+        associated_token::mint = mint_a,
+        associated_token::authority = escrow,
+        associated_token::token_program = token_program,
     )]
     pub vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
     #[account(
         init_if_needed,
-        payer=taker,
-        associated_token::mint=mint_a,
-        associated_token::authority=taker,
-        associated_token::token_program=token_program
+        payer = taker,
+        associated_token::mint = mint_a,
+        associated_token::authority = taker,
+        associated_token::token_program = token_program,
     )]
     pub taker_ata_a: Box<InterfaceAccount<'info, TokenAccount>>,
+
     #[account(
         mut,
-        associated_token::mint=mint_b,
-        associated_token::authority=maker,
-        associated_token::token_program=token_program
+        associated_token::mint = mint_b,
+        associated_token::authority = taker,
+        associated_token::token_program = token_program,
     )]
-    pub taker_ata_b: Box<InterfaceAccount<'info, TokenAccount>>, //
+    pub taker_ata_b: Box<InterfaceAccount<'info, TokenAccount>>,
+
     #[account(
         init_if_needed,
-        payer=maker,
-        associated_token::mint = mint_a,
+        payer = taker,
+        associated_token::mint = mint_b,
         associated_token::authority = maker,
-        associated_token::token_program = token_program
+        associated_token::token_program = token_program,
     )]
     pub maker_ata_b: Box<InterfaceAccount<'info, TokenAccount>>,
-    //Programs
+
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
     pub token_program: Interface<'info, TokenInterface>,
@@ -87,13 +82,14 @@ pub enum EscrowError {
     InvalidAmount,
     #[msg("The maker is not valid")]
     InvalidMaker,
-    #[msg("Invalid Mint Account.")]
+    #[msg("Invalid Mint A account.")]
     InvalidMintA,
+    #[msg("Invalid Mint B account.")]
     InvalidMintB,
 }
 
 impl<'info> TakeEscrow<'info> {
-    pub fn transfer_to_maker(&mut self) -> Result<()> {
+    pub fn send_to_maker(&mut self) -> Result<()> {
         transfer_checked(
             CpiContext::new(
                 self.token_program.to_account_info(),
@@ -109,17 +105,16 @@ impl<'info> TakeEscrow<'info> {
         )?;
         Ok(())
     }
-    pub fn withdraw_and_close_vault(&mut self) -> Result<()> {
-        //Create the signer seeds for the vault,
 
+    pub fn withdraw_and_close_vault(&mut self) -> Result<()> {
+        let maker_key = self.maker.key();
+        let seed_bytes = self.escrow.seed.to_be_bytes();
         let signer_seeds: [&[&[u8]]; 1] = [&[
             b"escrow",
-            self.maker.to_account_info().key.as_ref(),
-            &self.escrow.seed.to_be_bytes()[..],
+            maker_key.as_ref(),
+            seed_bytes.as_ref(),
             &[self.escrow.bump],
         ]];
-
-        //Transfer Token A Vault-->Taker,
 
         transfer_checked(
             CpiContext::new_with_signer(
@@ -136,7 +131,6 @@ impl<'info> TakeEscrow<'info> {
             self.mint_a.decimals,
         )?;
 
-        //Close the Vault
         close_account(CpiContext::new_with_signer(
             self.token_program.to_account_info(),
             CloseAccount {
